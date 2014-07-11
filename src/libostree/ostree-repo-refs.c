@@ -348,6 +348,92 @@ resolve_refspec (OstreeRepo     *self,
 }
 
 /**
+ * add_to_checksum_array:
+ * @key: a key of a key-value pair
+ * @value: A value of a key-value pair
+ * @vals: An array to which we add the value argument
+ *
+ * This function checks if the given value is in the vals array and if
+ * it is not in the array, appends it to the end.  Do nothing if already
+ * in the array.  This exists as a helper function for the hash-table foreach
+ * in ostree_repo_resolve_partial_checksum
+ */
+static void
+add_to_checksum_array (GVariant *key, gchar *value, GPtrArray *vals)
+{
+  guint i;
+  gboolean in_array = FALSE;
+  const char *checksum = NULL;
+  OstreeObjectType objtype;
+
+  ostree_object_name_deserialize (key, &checksum, &objtype);
+
+  for (i=0; i<vals->len; i++)
+    if (g_strcmp0 (checksum, vals->pdata[i]) == 0)
+      in_array=TRUE;
+  if (!in_array)
+    g_ptr_array_add (vals, (gpointer) checksum);
+}
+
+/**
+ * ostree_repo_resolve_partial_checksum:
+ * @self: Repo
+ * @refspec: A refspec
+ * @full_checksum (out) (transfer full): A full checksum corresponding to the truncated ref given
+ * @error: Error
+ *
+ * Look up the existing refspec checksums.  If the given ref is a unique truncated beginning
+ * of a valid checksum it will return that checksum in the parameter @full_checksum
+ */
+static gboolean
+ostree_repo_resolve_partial_checksum (OstreeRepo   *self,
+                                      const char   *refspec,
+                                      char        **full_checksum,
+                                      GError      **error)
+{
+  static GPtrArray *checksums;
+  gboolean ret = FALSE;
+  GHashTable *ref_list;
+  gs_free char *ret_rev = NULL;
+  GCancellable *cancellable = g_cancellable_new ();
+
+  checksums = g_ptr_array_new ();
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  /* this looks through all objects and adds them to the ref_list if:
+     a) they are a commit object AND
+     b) the obj checksum starts with the partual checksum defined by "refspec" */
+  if (!ostree_repo_list_commit_objects_starting_with (self, refspec, &ref_list, cancellable, error))
+    goto out;
+
+  /* adds each checksum value of has table to array checksums */
+  g_hash_table_foreach (ref_list, (GHFunc)add_to_checksum_array, checksums); 
+
+  /* length less than one - no commits match the partial refspec */
+  if (checksums->len < 1)
+    goto out;
+
+  /* length more than one - multiple commits match partial refspec: is not unique */
+  else if (checksums->len > 1)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Refspec %s not unique", refspec);
+      goto out;
+    }
+    
+  /* length is 1 - a single matching commit gives us our revision */
+  else
+    {
+      ret_rev = (char *) checksums->pdata[0];
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (full_checksum, &ret_rev);
+ out:
+  return ret;
+}
+
+/**
  * ostree_repo_resolve_rev:
  * @self: Repo
  * @refspec: A refspec
@@ -374,8 +460,13 @@ ostree_repo_resolve_rev (OstreeRepo     *self,
     {
       ret_rev = g_strdup (refspec);
     }
-  else
+  /* if it's not a partial checksum, it will attempt to resolve it as a 
+     refspec.  If it is a partial checksum, it will set ret_rev appropriately */
+  else if (!ostree_repo_resolve_partial_checksum (self, refspec, &ret_rev, error))
     {
+      if (error != NULL && *error != NULL)
+        goto out;
+
       if (g_str_has_suffix (refspec, "^"))
         {
           gs_free char *parent_refspec = NULL;

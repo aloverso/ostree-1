@@ -856,6 +856,7 @@ list_loose_objects_at (OstreeRepo             *self,
                        GHashTable             *inout_objects,
                        const char             *prefix,
                        int                     dfd,
+                       const char             *commit_starting_with,
                        GCancellable           *cancellable,
                        GError                **error)
 {
@@ -896,6 +897,22 @@ list_loose_objects_at (OstreeRepo             *self,
       else
         continue;
 
+      /* if we passed in a "starting with" argument, then
+         we only want to return .commit objects with a checksum
+         that matches the commit_starting_with argument */
+      if (commit_starting_with)
+        {
+          char *full_name = g_strconcat (prefix, name, NULL);
+
+          /* object is not a commit, do not add to array */
+          if (objtype != OSTREE_OBJECT_TYPE_COMMIT)
+              continue;
+
+          /* commit checksum does not match "starting with", do not add to array */     
+          if (!g_strcmp0 (commit_starting_with, g_strndup (full_name, strlen (commit_starting_with))) == 0)
+            continue;
+        }
+
       if ((dot - name) == 62)
         {
           GVariant *key, *value;
@@ -923,6 +940,7 @@ list_loose_objects_at (OstreeRepo             *self,
 static gboolean
 list_loose_objects (OstreeRepo                     *self,
                     GHashTable                     *inout_objects,
+                    const char                     *commit_starting_with,
                     GCancellable                   *cancellable,
                     GError                        **error)
 {
@@ -950,7 +968,8 @@ list_loose_objects (OstreeRepo                     *self,
         }
       /* Takes ownership of dfd */
       if (!list_loose_objects_at (self, inout_objects, buf, dfd,
-                                  cancellable, error))
+                                       commit_starting_with,
+                                       cancellable, error))
         goto out;
     }
 
@@ -1568,11 +1587,11 @@ ostree_repo_list_objects (OstreeRepo                  *self,
 
   if (flags & OSTREE_REPO_LIST_OBJECTS_LOOSE)
     {
-      if (!list_loose_objects (self, ret_objects, cancellable, error))
+      if (!list_loose_objects (self, ret_objects, NULL, cancellable, error))
         goto out;
       if (self->parent_repo)
         {
-          if (!list_loose_objects (self->parent_repo, ret_objects, cancellable, error))
+          if (!list_loose_objects (self->parent_repo, ret_objects, NULL, cancellable, error))
             goto out;
         }
     }
@@ -1584,6 +1603,53 @@ ostree_repo_list_objects (OstreeRepo                  *self,
 
   ret = TRUE;
   ot_transfer_out_value (out_objects, &ret_objects);
+ out:
+  return ret;
+}
+
+/**
+ * ostree_repo_list_commit_objects_starting_with:
+ * @self: Repo
+ * @start: List commits starting with this checksum
+ * @out_commits: Array of GVariants
+ * @cancellable: Cancellable
+ * @error: Error
+ *
+ * This function synchronously enumerates all commit objects starting
+ * with @start, returning data in @out_commits.
+ *
+ * Returns: %TRUE on success, %FALSE on error, and @error will be set
+ */
+gboolean
+ostree_repo_list_commit_objects_starting_with (OstreeRepo                  *self,
+                                               const char                  *start,
+                                               GHashTable                 **out_commits,
+                                               GCancellable                *cancellable,
+                                               GError                     **error)
+{
+  gboolean ret = FALSE;
+  gs_unref_hashtable GHashTable *ret_commits = NULL;
+
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+  g_return_val_if_fail (self->inited, FALSE);
+
+  ret_commits = g_hash_table_new_full (ostree_hash_object_name, g_variant_equal,
+                                       (GDestroyNotify) g_variant_unref,
+                                       (GDestroyNotify) g_variant_unref);
+
+  if (!list_loose_objects (self, ret_commits, start, cancellable, error))
+        goto out;
+
+
+  if (self->parent_repo)
+    {
+      if (!list_loose_objects (self->parent_repo, ret_commits, start,
+                               cancellable, error))
+        goto out;
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_commits, &ret_commits);
  out:
   return ret;
 }
