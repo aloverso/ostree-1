@@ -897,29 +897,27 @@ list_loose_objects_at (OstreeRepo             *self,
       else
         continue;
 
+      memcpy (buf, prefix, 2);
+      memcpy (buf + 2, name, 62);
+      buf[sizeof(buf)-1] = '\0';
+
       /* if we passed in a "starting with" argument, then
          we only want to return .commit objects with a checksum
          that matches the commit_starting_with argument */
       if (commit_starting_with)
         {
-          char *full_name = g_strconcat (prefix, name, NULL);
-
           /* object is not a commit, do not add to array */
           if (objtype != OSTREE_OBJECT_TYPE_COMMIT)
               continue;
 
           /* commit checksum does not match "starting with", do not add to array */     
-          if (!g_strcmp0 (commit_starting_with, g_strndup (full_name, strlen (commit_starting_with))) == 0)
+          if (!g_str_has_prefix (buf, commit_starting_with))
             continue;
         }
 
       if ((dot - name) == 62)
         {
           GVariant *key, *value;
-
-          memcpy (buf, prefix, 2);
-          memcpy (buf + 2, name, 62);
-          buf[sizeof(buf)-1] = '\0';
 
           key = ostree_object_name_serialize (buf, objtype);
           value = g_variant_new ("(b@as)",
